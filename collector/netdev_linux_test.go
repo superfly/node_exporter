@@ -18,6 +18,8 @@ package collector
 import (
 	"io"
 	"log/slog"
+	"regexp"
+	"slices"
 	"testing"
 
 	"github.com/jsimonetti/rtnetlink/v2"
@@ -165,7 +167,7 @@ var links = []rtnetlink.LinkMessage{
 func TestNetDevStatsIgnore(t *testing.T) {
 	filter := newDeviceFilter("^veth", "")
 
-	netStats := parseNetlinkStats(links, &filter, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	netStats := parseNetlinkStats(links, &filter, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	if want, got := uint64(10437182923), netStats["wlan0"]["receive_bytes"]; want != got {
 		t.Errorf("want netstat wlan0 bytes %v, got %v", want, got)
@@ -198,7 +200,7 @@ func TestNetDevStatsIgnore(t *testing.T) {
 
 func TestNetDevStatsAccept(t *testing.T) {
 	filter := newDeviceFilter("", "^💩0$")
-	netStats := parseNetlinkStats(links, &filter, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	netStats := parseNetlinkStats(links, &filter, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	if want, got := 1, len(netStats); want != got {
 		t.Errorf("want count of devices to be %d, got %d", want, got)
@@ -229,7 +231,7 @@ func TestNetDevLegacyMetricNames(t *testing.T) {
 	}
 
 	filter := newDeviceFilter("", "")
-	netStats := parseNetlinkStats(links, &filter, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	netStats := parseNetlinkStats(links, &filter, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	for dev, devStats := range netStats {
 		legacy(devStats)
@@ -262,7 +264,7 @@ func TestNetDevLegacyMetricValues(t *testing.T) {
 	}
 
 	filter := newDeviceFilter("", "^enp0s0f0$")
-	netStats := parseNetlinkStats(links, &filter, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	netStats := parseNetlinkStats(links, &filter, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	metrics, ok := netStats["enp0s0f0"]
 	if !ok {
 		t.Error("expected stats for interface enp0s0f0")
@@ -284,7 +286,7 @@ func TestNetDevLegacyMetricValues(t *testing.T) {
 
 func TestNetDevMetricValues(t *testing.T) {
 	filter := newDeviceFilter("", "")
-	netStats := parseNetlinkStats(links, &filter, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	netStats := parseNetlinkStats(links, &filter, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	for _, msg := range links {
 		device := msg.Attributes.Name
@@ -336,5 +338,55 @@ func TestNetDevMetricValues(t *testing.T) {
 				t.Errorf("want %s %d, got %d", name, want, got)
 			}
 		}
+	}
+}
+
+func TestNetDevStatsNoCarrierExclude(t *testing.T) {
+	carrier := func(v uint8) *uint8 { return &v }
+	carrierLinks := []rtnetlink.LinkMessage{
+		{Attributes: &rtnetlink.LinkAttributes{Name: "m286919eb47e558", Carrier: carrier(0), Stats64: &rtnetlink.LinkStats64{}}},
+		{Attributes: &rtnetlink.LinkAttributes{Name: "m0803432a01e038", Carrier: carrier(1), Stats64: &rtnetlink.LinkStats64{}}},
+		{Attributes: &rtnetlink.LinkAttributes{Name: "me826362b2d3508", Stats64: &rtnetlink.LinkStats64{}}},
+		{Attributes: &rtnetlink.LinkAttributes{Name: "eno2", Carrier: carrier(0), Stats64: &rtnetlink.LinkStats64{}}},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	tests := []struct {
+		name    string
+		exclude string
+		pattern *regexp.Regexp
+		want    []string
+	}{
+		{
+			name: "nil pattern keeps all",
+			want: []string{"eno2", "m0803432a01e038", "m286919eb47e558", "me826362b2d3508"},
+		},
+		{
+			name:    "drops matching device without carrier",
+			pattern: regexp.MustCompile(`^m[0-9a-f]{14}$`),
+			want:    []string{"eno2", "m0803432a01e038", "me826362b2d3508"},
+		},
+		{
+			name:    "device-exclude still applies",
+			exclude: "^m0803432a01e038$",
+			pattern: regexp.MustCompile(`^m[0-9a-f]{14}$`),
+			want:    []string{"eno2", "me826362b2d3508"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filter := newDeviceFilter(tt.exclude, "")
+			netStats := parseNetlinkStats(carrierLinks, &filter, tt.pattern, logger)
+
+			var got []string
+			for name := range netStats {
+				got = append(got, name)
+			}
+			slices.Sort(got)
+			if !slices.Equal(tt.want, got) {
+				t.Errorf("want devices %v, got %v", tt.want, got)
+			}
+		})
 	}
 }
