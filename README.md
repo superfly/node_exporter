@@ -120,6 +120,7 @@ hwmon | sensor | --collector.hwmon.sensor-include | --collector.hwmon.sensor-exc
 infiniband | device | --collector.infiniband.device-include | --collector.infiniband.device-exclude
 interrupts | name | --collector.interrupts.name-include | --collector.interrupts.name-exclude
 netdev | device | --collector.netdev.device-include | --collector.netdev.device-exclude
+netdev | device without carrier | N/A | --collector.netdev.device-exclude-no-carrier
 qdisc | device | --collector.qdisc.device-include | --collector.qdisc.device-exclude
 slabinfo | slab-names | --collector.slabinfo.slabs-include | --collector.slabinfo.slabs-exclude
 sysctl | all | --collector.sysctl.include | N/A

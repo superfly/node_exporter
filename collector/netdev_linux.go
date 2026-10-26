@@ -18,6 +18,8 @@ package collector
 import (
 	"fmt"
 	"log/slog"
+	"regexp"
+	"sync"
 
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/jsimonetti/rtnetlink/v2"
@@ -26,18 +28,26 @@ import (
 )
 
 var (
-	netDevNetlink      = kingpin.Flag("collector.netdev.netlink", "Use netlink to gather stats instead of /proc/net/dev.").Default("true").Bool()
-	netdevLabelIfAlias = kingpin.Flag("collector.netdev.label-ifalias", "Add ifAlias label").Default("false").Bool()
+	netDevNetlink          = kingpin.Flag("collector.netdev.netlink", "Use netlink to gather stats instead of /proc/net/dev.").Default("true").Bool()
+	netDevNoCarrierExclude = kingpin.Flag("collector.netdev.device-exclude-no-carrier", "Regexp of net devices to exclude while they have no carrier (requires --collector.netdev.netlink).").Regexp()
+	netdevLabelIfAlias     = kingpin.Flag("collector.netdev.label-ifalias", "Add ifAlias label").Default("false").Bool()
+
+	netDevNoCarrierWarnOnce sync.Once
 )
 
 func getNetDevStats(filter *deviceFilter, logger *slog.Logger) (netDevStats, error) {
 	if *netDevNetlink {
-		return netlinkStats(filter, logger)
+		return netlinkStats(filter, *netDevNoCarrierExclude, logger)
+	}
+	if *netDevNoCarrierExclude != nil {
+		netDevNoCarrierWarnOnce.Do(func() {
+			logger.Warn("--collector.netdev.device-exclude-no-carrier has no effect without --collector.netdev.netlink")
+		})
 	}
 	return procNetDevStats(filter, logger)
 }
 
-func netlinkStats(filter *deviceFilter, logger *slog.Logger) (netDevStats, error) {
+func netlinkStats(filter *deviceFilter, noCarrierExclude *regexp.Regexp, logger *slog.Logger) (netDevStats, error) {
 	conn, err := rtnetlink.Dial(nil)
 	if err != nil {
 		return nil, err
@@ -49,10 +59,10 @@ func netlinkStats(filter *deviceFilter, logger *slog.Logger) (netDevStats, error
 		return nil, err
 	}
 
-	return parseNetlinkStats(links, filter, logger), nil
+	return parseNetlinkStats(links, filter, noCarrierExclude, logger), nil
 }
 
-func parseNetlinkStats(links []rtnetlink.LinkMessage, filter *deviceFilter, logger *slog.Logger) netDevStats {
+func parseNetlinkStats(links []rtnetlink.LinkMessage, filter *deviceFilter, noCarrierExclude *regexp.Regexp, logger *slog.Logger) netDevStats {
 	metrics := netDevStats{}
 
 	for _, msg := range links {
@@ -94,6 +104,14 @@ func parseNetlinkStats(links []rtnetlink.LinkMessage, filter *deviceFilter, logg
 
 		if filter.ignored(name) {
 			logger.Debug("Ignoring device", "device", name)
+			continue
+		}
+
+		// Filter on IFLA_CARRIER rather than operstate: in-use taps often
+		// report operstate UNKNOWN. A nil carrier was not reported, so keep it.
+		if noCarrierExclude != nil && noCarrierExclude.MatchString(name) &&
+			msg.Attributes.Carrier != nil && *msg.Attributes.Carrier == 0 {
+			logger.Debug("Ignoring device without carrier", "device", name)
 			continue
 		}
 
